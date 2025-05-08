@@ -10,9 +10,6 @@ st.set_page_config(page_title="Amazon Products Manager", layout="wide")
 
 # Function to create Snowflake connection
 def create_snowflake_connection():
-    # Get connection parameters from environment variables or Streamlit secrets
-    # For local testing, you can use st.secrets
-    # For deployment, set these as environment variables in Streamlit Cloud
     try:
         connection_parameters = {
             "account": st.secrets["snowflake"]["account"],
