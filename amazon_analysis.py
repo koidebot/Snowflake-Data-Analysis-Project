@@ -6,7 +6,7 @@ from snowflake.snowpark.functions import col, lit, dayofweek, sum, count, datedi
 import os
 
 # Set page configuration
-st.set_page_config(page_title="Amazon Products Manager", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Amazon Products Manager", layout="wide")
 
 # Function to create Snowflake connection
 def create_snowflake_connection():
@@ -53,134 +53,35 @@ if "query" not in st.session_state:
 
 # Function to load data
 @st.cache_data(ttl=3600)
-def load_data(_session):
+def load_data(session):
     try:
-        # Get connection info for debugging
-        connection_info = _session.get_current_account()
-        current_db = _session.get_current_database()
-        current_schema = _session.get_current_schema()
-        current_role = _session.get_current_role()
+        meta = session.table("BEAUTY_PRODUCTS")
+        reviews = session.table("BEAUTY_REVIEWS")
         
-        st.sidebar.write("Connected to Snowflake:")
-        st.sidebar.write(f"- Account: {connection_info}")
-        st.sidebar.write(f"- Database: {current_db}")
-        st.sidebar.write(f"- Schema: {current_schema}")
-        st.sidebar.write(f"- Role: {current_role}")
+        df_tmp = reviews.join(meta, meta["Parent_ID_META"] == reviews["Parent_ID_REV"])
+        df_tmp = df_tmp.drop("Parent_ID_META")
+        df_tmp = df_tmp.limit(10000)
         
-        # Use fully qualified table names
-        database = current_db
-        schema = current_schema
+        df = df_tmp.group_by("Parent_ID_REV").agg(
+            listagg(col("REVIEW"), "\n").alias("Reviews"),
+            sum(col("NUM_RATINGS")).alias("Total Ratings"), 
+            (sum(col("AVG_RATING") * col("NUM_RATINGS")) / sum(col("NUM_RATINGS"))).alias("Average Rating"), 
+            (sum(col("Sentiment") * col("NUM_RATINGS")) / sum(col("NUM_RATINGS"))).alias("Sentiment")
+        ).select(["Parent_ID_REV", "Reviews", "Total Ratings", "Average Rating", "Sentiment"])
         
-        # Option to select different schema/database
-        with st.sidebar.expander("Change Database/Schema"):
-            alt_db = st.text_input("Database", value=current_db)
-            alt_schema = st.text_input("Schema", value=current_schema)
-            if st.button("Use These Settings"):
-                database = alt_db
-                schema = alt_schema
-                _session.use_database(database)
-                _session.use_schema(schema)
+        df = df.with_column("Combined", concat(lit("ID: "), col("PARENT_ID_REV"), lit(": "), col("REVIEWS")))
         
-        # Try to list tables to help debug
+        # Save data to Snowflake table
         try:
-            tables = _session.sql(f"SHOW TABLES IN {database}.{schema}").collect()
-            with st.sidebar.expander("Available Tables"):
-                for table in tables:
-                    st.write(f"- {table['name']}")
+            df.write.mode("overwrite").save_as_table("ALL_PRODUCTS")
         except Exception as e:
-            st.sidebar.warning(f"Could not list tables: {str(e)}")
+            st.warning(f"Could not save to ALL_PRODUCTS table: {str(e)}")
         
-        # Default table names
-        meta_table = "BEAUTY_PRODUCTS"
-        reviews_table = "BEAUTY_REVIEWS"
-        
-        # Add option to enter custom table names
-        with st.sidebar.expander("Custom Table Names"):
-            custom_meta_table = st.text_input("Products Table Name", value=meta_table)
-            custom_reviews_table = st.text_input("Reviews Table Name", value=reviews_table)
-            if st.button("Use These Tables"):
-                meta_table = custom_meta_table
-                reviews_table = custom_reviews_table
-        
-        # Try to access tables with selected names
-        try:
-            meta = _session.table(f"{database}.{schema}.{meta_table}")
-            reviews = _session.table(f"{database}.{schema}.{reviews_table}")
-            
-            # Display sample data for debugging
-            with st.sidebar.expander("Sample Data"):
-                st.write("Products Table:")
-                try:
-                    meta_sample = meta.limit(5).to_pandas()
-                    st.dataframe(meta_sample)
-                except Exception as e:
-                    st.write(f"Error displaying Products sample: {str(e)}")
-                    
-                st.write("Reviews Table:")
-                try:
-                    reviews_sample = reviews.limit(5).to_pandas()
-                    st.dataframe(reviews_sample)
-                except Exception as e:
-                    st.write(f"Error displaying Reviews sample: {str(e)}")
-        except Exception as e:
-            st.error(f"Error accessing tables: {str(e)}")
-            return pd.DataFrame()
-        
-        # Check column names
-        meta_cols = meta.columns
-        reviews_cols = reviews.columns
-        
-        with st.sidebar.expander("Column Names"):
-            st.write("Products Table Columns:")
-            st.write(meta_cols)
-            st.write("Reviews Table Columns:")
-            st.write(reviews_cols)
-        
-        # Check if required columns exist
-        parent_id_meta = "Parent_ID_META" if "Parent_ID_META" in meta_cols else "PARENT_ID_META"
-        parent_id_rev = "Parent_ID_REV" if "Parent_ID_REV" in reviews_cols else "PARENT_ID_REV"
-        review_col = "REVIEW" if "REVIEW" in reviews_cols else "Review"
-        num_ratings_col = "NUM_RATINGS" if "NUM_RATINGS" in reviews_cols else "Num_Ratings"
-        avg_rating_col = "AVG_RATING" if "AVG_RATING" in reviews_cols else "Avg_Rating"
-        sentiment_col = "Sentiment" if "Sentiment" in reviews_cols else "SENTIMENT"
-        
-        # Perform join with appropriate column names
-        try:
-            df_tmp = reviews.join(meta, meta[parent_id_meta] == reviews[parent_id_rev])
-            
-            # Drop redundant column if it exists
-            if parent_id_meta in df_tmp.columns:
-                df_tmp = df_tmp.drop(parent_id_meta)
-                
-            df_tmp = df_tmp.limit(10000)
-            
-            # Dynamic column references for aggregation
-            df = df_tmp.group_by(parent_id_rev).agg(
-                listagg(col(review_col), "\n").alias("Reviews"),
-                sum(col(num_ratings_col)).alias("Total Ratings"), 
-                (sum(col(avg_rating_col) * col(num_ratings_col)) / sum(col(num_ratings_col))).alias("Average Rating"), 
-                (sum(col(sentiment_col) * col(num_ratings_col)) / sum(col(num_ratings_col))).alias("Sentiment")
-            ).select([parent_id_rev, "Reviews", "Total Ratings", "Average Rating", "Sentiment"])
-            
-            df = df.with_column("Combined", concat(lit("ID: "), col(parent_id_rev), lit(": "), col("Reviews")))
-            
-            # Convert to pandas
-            pd_df = df.select(parent_id_rev, "Reviews", "Total Ratings", "Average Rating", "Sentiment").toPandas()
-            
-            # Rename columns to standard format if needed
-            pd_df = pd_df.rename(columns={
-                parent_id_rev: "PARENT_ID_REV",
-                "Sentiment": "SENTIMENT"
-            })
-            
-            return pd_df
-            
-        except Exception as e:
-            st.error(f"Error in data processing: {str(e)}")
-            return pd.DataFrame()
-        
+        # Convert to pandas
+        pd_df = df.select("PARENT_ID_REV", "REVIEWS", "Total Ratings", "Average Rating", "SENTIMENT").toPandas()
+        return pd_df
     except Exception as e:
-        st.error(f"General error loading data: {str(e)}")
+        st.error(f"Error loading data: {str(e)}")
         return pd.DataFrame()
 
 # Function to update selection
@@ -188,7 +89,7 @@ def update_selection():
     st.session_state["query"] = None
 
 # Function to query Snowflake Cortex
-def get_ai_summary(_session, prompt, reviews):
+def get_ai_summary(session, prompt, reviews):
     try:
         sql_query = f"""
             SELECT SNOWFLAKE.CORTEX.COMPLETE(
@@ -196,7 +97,7 @@ def get_ai_summary(_session, prompt, reviews):
                 CONCAT('[INST] ', '{prompt}', ' ', '{reviews}', ' [/INST]')
             ) AS summary
         """
-        summary_df = _session.sql(sql_query).collect()
+        summary_df = session.sql(sql_query).collect()
         if summary_df:
             return summary_df[0]["SUMMARY"]
         return "No summary available."
@@ -210,7 +111,7 @@ try:
     
     # Load data
     with st.spinner("Loading data..."):
-        pd_df = load_data(_session=session)
+        pd_df = load_data(session)
     
     if not pd_df.empty:
         # Product selection
@@ -231,7 +132,7 @@ try:
             st.progress(progress_value)
         
         # Get reviews for selected product
-        reviews = pd_df[pd_df["PARENT_ID_REV"] == product_id]["Reviews"].dropna().iloc[0] if not pd_df[pd_df["PARENT_ID_REV"] == product_id]["Reviews"].dropna().empty else ""
+        reviews = pd_df[pd_df["PARENT_ID_REV"] == product_id]["REVIEWS"].dropna().iloc[0] if not pd_df[pd_df["PARENT_ID_REV"] == product_id]["REVIEWS"].dropna().empty else ""
         
         # Sample of reviews
         with st.expander("View sample of reviews"):
@@ -244,7 +145,7 @@ try:
         if q:
             with st.spinner("Analyzing reviews..."):
                 prompt = f'You are a product manager presenting customer feedback, and were asked this by your client: {q}. Provide a summary of reviews and feedback on the query you were given.'
-                summary_text = get_ai_summary(_session=session, prompt=prompt, reviews=reviews)
+                summary_text = get_ai_summary(session, prompt, reviews)
                 
                 st.subheader("AI Analysis")
                 st.write(summary_text)
