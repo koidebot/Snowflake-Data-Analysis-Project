@@ -53,10 +53,10 @@ if "query" not in st.session_state:
 
 # Function to load data
 @st.cache_data(ttl=3600)
-def load_data(session):
+def load_data(_session):
     try:
-        meta = session.table("BEAUTY_PRODUCTS")
-        reviews = session.table("BEAUTY_REVIEWS")
+        meta = _session.table("BEAUTY_PRODUCTS")
+        reviews = _session.table("BEAUTY_REVIEWS")
         
         df_tmp = reviews.join(meta, meta["Parent_ID_META"] == reviews["Parent_ID_REV"])
         df_tmp = df_tmp.drop("Parent_ID_META")
@@ -89,7 +89,7 @@ def update_selection():
     st.session_state["query"] = None
 
 # Function to query Snowflake Cortex
-def get_ai_summary(session, prompt, reviews):
+def get_ai_summary(_session, prompt, reviews):
     try:
         sql_query = f"""
             SELECT SNOWFLAKE.CORTEX.COMPLETE(
@@ -97,7 +97,7 @@ def get_ai_summary(session, prompt, reviews):
                 CONCAT('[INST] ', '{prompt}', ' ', '{reviews}', ' [/INST]')
             ) AS summary
         """
-        summary_df = session.sql(sql_query).collect()
+        summary_df = _session.sql(sql_query).collect()
         if summary_df:
             return summary_df[0]["SUMMARY"]
         return "No summary available."
@@ -111,7 +111,7 @@ try:
     
     # Load data
     with st.spinner("Loading data..."):
-        pd_df = load_data(session)
+        pd_df = load_data(_session=session)
     
     if not pd_df.empty:
         # Product selection
@@ -145,7 +145,7 @@ try:
         if q:
             with st.spinner("Analyzing reviews..."):
                 prompt = f'You are a product manager presenting customer feedback, and were asked this by your client: {q}. Provide a summary of reviews and feedback on the query you were given.'
-                summary_text = get_ai_summary(session, prompt, reviews)
+                summary_text = get_ai_summary(_session=session, prompt=prompt, reviews=reviews)
                 
                 st.subheader("AI Analysis")
                 st.write(summary_text)
