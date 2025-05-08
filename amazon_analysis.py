@@ -82,108 +82,105 @@ def load_data(_session):
                 _session.use_schema(schema)
         
         # Try to list tables to help debug
-        tables = _session.sql(f"SHOW TABLES IN {database}.{schema}").collect()
-        with st.sidebar.expander("Available Tables"):
-            for table in tables:
-                st.write(f"- {table['name']}")
+        try:
+            tables = _session.sql(f"SHOW TABLES IN {database}.{schema}").collect()
+            with st.sidebar.expander("Available Tables"):
+                for table in tables:
+                    st.write(f"- {table['name']}")
+        except Exception as e:
+            st.sidebar.warning(f"Could not list tables: {str(e)}")
+        
+        # Default table names
+        meta_table = "BEAUTY_PRODUCTS"
+        reviews_table = "BEAUTY_REVIEWS"
         
         # Add option to enter custom table names
         with st.sidebar.expander("Custom Table Names"):
-            meta_table = st.text_input("Products Table Name", value="BEAUTY_PRODUCTS")
-            reviews_table = st.text_input("Reviews Table Name", value="BEAUTY_REVIEWS")
+            custom_meta_table = st.text_input("Products Table Name", value=meta_table)
+            custom_reviews_table = st.text_input("Reviews Table Name", value=reviews_table)
             if st.button("Use These Tables"):
-                # Use the custom table names
-                try:
-                    meta = _session.table(f"{database}.{schema}.{meta_table}")
-                    reviews = _session.table(f"{database}.{schema}.{reviews_table}")
-                except Exception as e:
-                    st.sidebar.error(f"Error accessing tables: {str(e)}")
-                    return pd.DataFrame()
+                meta_table = custom_meta_table
+                reviews_table = custom_reviews_table
         
-        # Handle case where custom table names aren't provided
-        if 'meta' not in locals() or 'reviews' not in locals():
+        # Try to access tables with selected names
+        try:
             meta = _session.table(f"{database}.{schema}.{meta_table}")
             reviews = _session.table(f"{database}.{schema}.{reviews_table}")
             
-        # Display sample data for debugging
-        with st.sidebar.expander("Sample Data"):
-            st.write("Products Table:")
-            try:
-                meta_sample = meta.limit(5).to_pandas()
-                st.dataframe(meta_sample)
-            except Exception as e:
-                st.write(f"Error displaying Products sample: {str(e)}")
-                
-            st.write("Reviews Table:")
-            try:
-                reviews_sample = reviews.limit(5).to_pandas()
-                st.dataframe(reviews_sample)
-            except Exception as e:
-                st.write(f"Error displaying Reviews sample: {str(e)}")
-                
+            # Display sample data for debugging
+            with st.sidebar.expander("Sample Data"):
+                st.write("Products Table:")
+                try:
+                    meta_sample = meta.limit(5).to_pandas()
+                    st.dataframe(meta_sample)
+                except Exception as e:
+                    st.write(f"Error displaying Products sample: {str(e)}")
+                    
+                st.write("Reviews Table:")
+                try:
+                    reviews_sample = reviews.limit(5).to_pandas()
+                    st.dataframe(reviews_sample)
+                except Exception as e:
+                    st.write(f"Error displaying Reviews sample: {str(e)}")
+        except Exception as e:
+            st.error(f"Error accessing tables: {str(e)}")
+            return pd.DataFrame()
+        
         # Check column names
-        try:
-            meta_cols = meta.columns
-            reviews_cols = reviews.columns
-            
-            with st.sidebar.expander("Column Names"):
-                st.write("Products Table Columns:")
-                st.write(meta_cols)
-                st.write("Reviews Table Columns:")
-                st.write(reviews_cols)
-                
-            # Check if required columns exist
-            parent_id_meta = "Parent_ID_META" if "Parent_ID_META" in meta_cols else "PARENT_ID_META"
-            parent_id_rev = "Parent_ID_REV" if "Parent_ID_REV" in reviews_cols else "PARENT_ID_REV"
-            
-            # Perform join with appropriate column names
-            df_tmp = reviews.join(meta, meta[parent_id_meta] == reviews[parent_id_rev])
-        # Get column names dynamically
+        meta_cols = meta.columns
+        reviews_cols = reviews.columns
+        
+        with st.sidebar.expander("Column Names"):
+            st.write("Products Table Columns:")
+            st.write(meta_cols)
+            st.write("Reviews Table Columns:")
+            st.write(reviews_cols)
+        
+        # Check if required columns exist
+        parent_id_meta = "Parent_ID_META" if "Parent_ID_META" in meta_cols else "PARENT_ID_META"
+        parent_id_rev = "Parent_ID_REV" if "Parent_ID_REV" in reviews_cols else "PARENT_ID_REV"
         review_col = "REVIEW" if "REVIEW" in reviews_cols else "Review"
         num_ratings_col = "NUM_RATINGS" if "NUM_RATINGS" in reviews_cols else "Num_Ratings"
         avg_rating_col = "AVG_RATING" if "AVG_RATING" in reviews_cols else "Avg_Rating"
         sentiment_col = "Sentiment" if "Sentiment" in reviews_cols else "SENTIMENT"
         
-        df_tmp = df_tmp.drop(parent_id_meta) if parent_id_meta in df_tmp.columns else df_tmp
-        df_tmp = df_tmp.limit(10000)
-        
-        # Dynamic column references for aggregation
+        # Perform join with appropriate column names
         try:
+            df_tmp = reviews.join(meta, meta[parent_id_meta] == reviews[parent_id_rev])
+            
+            # Drop redundant column if it exists
+            if parent_id_meta in df_tmp.columns:
+                df_tmp = df_tmp.drop(parent_id_meta)
+                
+            df_tmp = df_tmp.limit(10000)
+            
+            # Dynamic column references for aggregation
             df = df_tmp.group_by(parent_id_rev).agg(
                 listagg(col(review_col), "\n").alias("Reviews"),
                 sum(col(num_ratings_col)).alias("Total Ratings"), 
                 (sum(col(avg_rating_col) * col(num_ratings_col)) / sum(col(num_ratings_col))).alias("Average Rating"), 
                 (sum(col(sentiment_col) * col(num_ratings_col)) / sum(col(num_ratings_col))).alias("Sentiment")
             ).select([parent_id_rev, "Reviews", "Total Ratings", "Average Rating", "Sentiment"])
-        except Exception as e:
-            st.error(f"Error in aggregation: {str(e)}")
-            # Try simplified aggregation if the first attempt fails
-            df = df_tmp.group_by(parent_id_rev).agg(
-                listagg(col(review_col), "\n").alias("Reviews")
-            ).select([parent_id_rev, "Reviews"])
             
-        df = df.with_column("Combined", concat(lit("ID: "), col(parent_id_rev), lit(": "), col("REVIEWS")))
+            df = df.with_column("Combined", concat(lit("ID: "), col(parent_id_rev), lit(": "), col("Reviews")))
+            
+            # Convert to pandas
+            pd_df = df.select(parent_id_rev, "Reviews", "Total Ratings", "Average Rating", "Sentiment").toPandas()
+            
+            # Rename columns to standard format if needed
+            pd_df = pd_df.rename(columns={
+                parent_id_rev: "PARENT_ID_REV",
+                "Sentiment": "SENTIMENT"
+            })
+            
+            return pd_df
+            
+        except Exception as e:
+            st.error(f"Error in data processing: {str(e)}")
+            return pd.DataFrame()
         
-        # Save data to Snowflake table - make this optional
-        save_table = False  # Change to True if you want to save to Snowflake
-        if save_table:
-            try:
-                df.write.mode("overwrite").save_as_table("ALL_PRODUCTS")
-            except Exception as e:
-                st.warning(f"Could not save to ALL_PRODUCTS table: {str(e)}")
-        
-        # Convert to pandas - adapt column names if needed
-        pd_df = df.select(parent_id_rev, "Reviews", "Total Ratings", "Average Rating", "Sentiment").toPandas()
-        
-        # Rename columns to standard format if needed
-        pd_df = pd_df.rename(columns={
-            parent_id_rev: "PARENT_ID_REV",
-            "Sentiment": "SENTIMENT"
-        })
-        
-        return pd_df
     except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
+        st.error(f"General error loading data: {str(e)}")
         return pd.DataFrame()
 
 # Function to update selection
@@ -234,7 +231,7 @@ try:
             st.progress(progress_value)
         
         # Get reviews for selected product
-        reviews = pd_df[pd_df["PARENT_ID_REV"] == product_id]["REVIEWS"].dropna().iloc[0] if not pd_df[pd_df["PARENT_ID_REV"] == product_id]["REVIEWS"].dropna().empty else ""
+        reviews = pd_df[pd_df["PARENT_ID_REV"] == product_id]["Reviews"].dropna().iloc[0] if not pd_df[pd_df["PARENT_ID_REV"] == product_id]["Reviews"].dropna().empty else ""
         
         # Sample of reviews
         with st.expander("View sample of reviews"):
