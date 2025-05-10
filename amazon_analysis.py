@@ -6,7 +6,7 @@ from snowflake.snowpark.functions import col, lit, dayofweek, sum, count, datedi
 import os
 
 # Set page configuration
-st.set_page_config(page_title="Amazon Products Manager", layout="wide")
+st.set_page_config(page_title="AI Amazon Product Manager", layout="wide")
 
 # Function to create Snowflake connection
 def create_snowflake_connection():
