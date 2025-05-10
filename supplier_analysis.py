@@ -9,7 +9,6 @@ st.set_page_config(page_title="Supplier Analysis App", layout="wide")
 
 # Establish Snowflake connection via Streamlit secrets
 @st.cache_resource
-```python
 def get_snowflake_session():
     creds = st.secrets["snowflake"]
     params = {
@@ -22,22 +21,29 @@ def get_snowflake_session():
         "schema":    creds["schema"],
     }
     return Session.builder.configs(params).create()
-```
 
 # Initialize session
-session = get_snowflake_session()
+try:
+    session = get_snowflake_session()
+except Exception as e:
+    st.error(f"Failed to connect to Snowflake: {e}")
+    st.stop()
 
 # App UI
-tab = st.radio("Select a Tab", ["Sales Forecast", "Sales Analysis Visualization"])
+tab = st.radio("Select a Tab", ["Sales Analysis Visualization", "Sales Forecast"])
 
 if tab == "Sales Analysis Visualization":
     # Load tables
-    df_customer = session.table("SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER")
-    df_lineitem = session.table("SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.LINEITEM")
-    df_partsupp = session.table("SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.PARTSUPP")
-    df_part     = session.table("SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.PART")
-    df_supplier = session.table("SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.SUPPLIER")
-    df_orders   = session.table("SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.ORDERS")
+    try:
+        df_customer = session.table("SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER")
+        df_lineitem = session.table("SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.LINEITEM")
+        df_partsupp = session.table("SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.PARTSUPP")
+        df_part     = session.table("SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.PART")
+        df_supplier = session.table("SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.SUPPLIER")
+        df_orders   = session.table("SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.ORDERS")
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        st.stop()
 
     # Two-column layout
     col_cust, col_sup = st.columns(2)
@@ -130,44 +136,70 @@ if tab == "Sales Analysis Visualization":
         st.altair_chart(chart, use_container_width=True)
 
 elif tab == "Sales Forecast":
+    # Check if SALES_DATA table exists
+    sales_exists = False
+    try:
+        sales_tables = session.sql("SHOW TABLES LIKE 'SALES_DATA'").collect()
+        sales_exists = len(sales_tables) > 0
+    except:
+        pass
+    
+    if not sales_exists:
+        st.error("SALES_DATA table not found. Please create this table in your Snowflake database.")
+        st.stop()
+    
     # Load and prepare
-    sales = session.table("SALES_DATA").with_column("DATE", to_date(col("DATE"), "DD/MM/YYYY")).limit(500)
-    pd_sales = sales.to_pandas()
+    try:
+        sales = session.table("SALES_DATA").with_column("DATE", to_date(col("DATE"), "DD/MM/YYYY")).limit(500)
+        pd_sales = sales.to_pandas()
+    except Exception as e:
+        st.error(f"Error loading sales data: {e}")
+        st.stop()
+
+    if pd_sales.empty:
+        st.warning("No sales data available.")
+        st.stop()
 
     store     = st.selectbox("Store", pd_sales["STORE"].unique())
     department= st.selectbox("Dept", pd_sales[pd_sales["STORE"] == store]["DEPT"].unique())
-    weeks     = st.number_input("Forecast Weeks", min_value=1, step=1)
+    weeks     = st.number_input("Forecast Weeks", min_value=1, value=4, step=1)
 
     if weeks:
-        # Build view and train forecast model
-        session.sql(f"""
-            CREATE OR REPLACE VIEW v_sales AS
-            SELECT ARRAY_CONSTRUCT(store, dept) AS series, date, weekly_sales
-            FROM SALES_DATA
-            WHERE store = '{store}' AND dept = '{department}';
-        """).collect()
-        session.sql(
-            """
-            CREATE OR REPLACE FUNCTION forecast_model AS \
-            SELECT * FROM SNOWFLAKE.ML.FORECAST(
-                INPUT_DATA => TABLE(v_sales),
-                SERIES_COLNAME => 'series',
-                TIMESTAMP_COLNAME => 'date',
-                TARGET_COLNAME => 'weekly_sales'
-            )
-            """
-        ).collect()
-        session.sql(f"CALL forecast_model(FORECASTING_PERIODS => {weeks})").collect()
+        try:
+            # Build view and train forecast model
+            session.sql(f"""
+                CREATE OR REPLACE VIEW v_sales AS
+                SELECT ARRAY_CONSTRUCT(store, dept) AS series, date, weekly_sales
+                FROM SALES_DATA
+                WHERE store = '{store}' AND dept = '{department}';
+            """).collect()
+            
+            session.sql(
+                """
+                CREATE OR REPLACE FUNCTION forecast_model AS \
+                SELECT * FROM SNOWFLAKE.ML.FORECAST(
+                    INPUT_DATA => TABLE(v_sales),
+                    SERIES_COLNAME => 'series',
+                    TIMESTAMP_COLNAME => 'date',
+                    TARGET_COLNAME => 'weekly_sales'
+                )
+                """
+            ).collect()
+            
+            session.sql(f"CALL forecast_model(FORECASTING_PERIODS => {weeks})").collect()
 
-        # Fetch results
-        fc = session.table("FORECAST").to_pandas()
-        actual = pd_sales.assign(Type="Actual")
-        forecast = fc.rename(columns={"FORECAST": "weekly_sales", "TS": "date"}).assign(Type="Forecast")
-        data = pd.concat([actual, forecast])
-        data["date"] = pd.to_datetime(data["date"])
+            # Fetch results
+            fc = session.table("FORECAST").to_pandas()
+            actual = pd_sales.assign(Type="Actual")
+            forecast = fc.rename(columns={"FORECAST": "weekly_sales", "TS": "date"}).assign(Type="Forecast")
+            data = pd.concat([actual, forecast])
+            data["date"] = pd.to_datetime(data["date"])
 
-        line = alt.Chart(data).mark_line().encode(
-            x="date:T", y="weekly_sales:Q", color="Type:N",
-            tooltip=["date", "weekly_sales", "Type"]
-        ).properties(title="Sales Forecast")
-        st.altair_chart(line, use_container_width=True)
+            line = alt.Chart(data).mark_line().encode(
+                x="date:T", y="weekly_sales:Q", color="Type:N",
+                tooltip=["date", "weekly_sales", "Type"]
+            ).properties(title="Sales Forecast")
+            st.altair_chart(line, use_container_width=True)
+        except Exception as e:
+            st.error(f"Error generating forecast: {e}")
+            st.info("Make sure your Snowflake account has Snowpark ML capabilities enabled.")
